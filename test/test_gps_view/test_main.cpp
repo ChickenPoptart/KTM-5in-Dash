@@ -78,6 +78,21 @@ void test_elevation_waits_for_valid_altitude() {
     TEST_ASSERT_EQUAL(5280, v.elevationFt);
 }
 
+void test_elevation_is_unknown_until_the_gps_has_an_altitude() {
+    // A fix comes before the altitude does: until then the height is unknown,
+    // not 0 ft (counting from 0 made a 4,600 ft "climb" on the old dash)
+    GpsView v;
+    GpsReading r;
+    r.locationValid = true;
+    gpsUpdateView(v, r);
+    TEST_ASSERT_FALSE(v.altitudeValid);
+    r.altitudeValid = true;
+    r.altitudeFt = 4602;
+    gpsUpdateView(v, r);
+    TEST_ASSERT_TRUE(v.altitudeValid);
+    TEST_ASSERT_EQUAL(4602, v.elevationFt);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_heading_just_below_north_rounds_to_zero);
@@ -87,5 +102,6 @@ int main() {
     RUN_TEST(test_stale_location_is_no_fix);
     RUN_TEST(test_fresh_location_is_a_fix_with_rounded_values);
     RUN_TEST(test_no_location_is_no_fix);
+    RUN_TEST(test_elevation_is_unknown_until_the_gps_has_an_altitude);
     return UNITY_END();
 }

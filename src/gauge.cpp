@@ -76,6 +76,11 @@ bool Gauges::begin() {
            rpmText.createSprite(RPM_TEXT_W, RPM_TEXT_H) != nullptr;
 }
 
+void Gauges::end() {
+    centre.deleteSprite();
+    rpmText.deleteSprite();
+}
+
 // Colours [from, to) of an arc either lit or unlit
 static void paintArc(LGFX_W5& g, int cx, int cy, int max, bool zoned, int from, int to, bool lit) {
     if (to <= from) return;
@@ -92,6 +97,53 @@ static void paintArc(LGFX_W5& g, int cx, int cy, int max, bool zoned, int from, 
     }
 }
 
+// ---- Retro: the arc as separate blocks, lit one at a time ----
+
+static const int SEGMENTS = 50;          // 200 rpm or 2 mph each
+static const float SEGMENT_GAP_DEG = 1.8f;
+
+static bool retro() { return theme() == THEME_RETRO; }
+
+// The colour of block i: its RPM zone (or the speed colour), dim if unlit
+static uint16_t segmentColour(int max, bool zoned, int i, bool lit) {
+    uint16_t c = COL_SPEED;
+    if (zoned) {
+        int v = (long)i * max / SEGMENTS;  // where the block starts
+        for (const Zone& z : RPM_ZONES) {
+            if (v >= z.from && v < z.to) c = z.color;
+        }
+    }
+    return lit ? c : dim(c);
+}
+
+static void paintSegment(LGFX_W5& g, int cx, int cy, int max, bool zoned, int i, bool lit) {
+    float step = (float)ARC_SWEEP_DEG / SEGMENTS;
+    float a0 = ARC_START_DEG + i * step + SEGMENT_GAP_DEG / 2;
+    arc(g, cx, cy, ARC_OUTER, ARC_INNER, a0, a0 + step - SEGMENT_GAP_DEG, segmentColour(max, zoned, i, lit));
+}
+
+// Seven-segment text over its unlit "8"s (the ghost segments of a real
+// LCD). DSEG digits are all one width, and "!" is a blank digit, so text
+// padded to the ghost's length lines up with it.
+static void segText(lgfx::LGFXBase& s, DashFont font, const char* ghost, const char* text, int x, int y,
+                    uint16_t color) {
+    useFont(s, font);
+    s.setTextDatum(textdatum_t::middle_center);
+    s.setTextColor(COL_TRACK);
+    s.drawString(ghost, x, y);
+    s.setTextColor(color);
+    s.drawString(text, x, y);
+}
+
+// value right-aligned in `digits` places, blanks as "!"; "--" when unknown
+static void segDigits(char* out, int size, int value, int digits, bool known) {
+    if (known) snprintf(out, size, "%*d", digits, value);
+    else snprintf(out, size, "%*s", digits, "--");
+    for (char* p = out; *p; p++) {
+        if (*p == ' ') *p = '!';
+    }
+}
+
 void Gauges::drawRing(int ox, int oy, uint16_t color) {
     int cx = ox + C, cy = oy + C;
     lcd.fillArc(cx, cy, RING_RADIUS + 3, RING_RADIUS - 3, 0, 360, dim(color));
@@ -102,7 +154,11 @@ void Gauges::drawDials() {
     for (ArcState* a : {&rpmArc, &speedArc}) {
         int cx = a->ox + C, cy = a->oy + C;
         lcd.fillRect(a->ox, a->oy, GAUGE_SIZE, GAUGE_SIZE, COL_BG);
-        paintArc(lcd, cx, cy, a->max, a->zoned, 0, a->max, false);
+        if (retro()) {
+            for (int i = 0; i < SEGMENTS; i++) paintSegment(lcd, cx, cy, a->max, a->zoned, i, false);
+        } else {
+            paintArc(lcd, cx, cy, a->max, a->zoned, 0, a->max, false);
+        }
         a->shown = 0;
 
         // Ticks just outside the band, numbers between them and the ring
@@ -137,6 +193,14 @@ void Gauges::moveArc(ArcState& a, int value) {
     if (value > a.max) value = a.max;
     if (value == a.shown) return;
     int cx = a.ox + C, cy = a.oy + C;
+    if (retro()) {  // repaint only the blocks that changed
+        int was = segmentsLit(a.shown, a.max, SEGMENTS), now = segmentsLit(value, a.max, SEGMENTS);
+        for (int i = was < now ? was : now; i < (was < now ? now : was); i++) {
+            paintSegment(lcd, cx, cy, a.max, a.zoned, i, i < now);
+        }
+        a.shown = value;
+        return;
+    }
     if (value > a.shown) paintArc(lcd, cx, cy, a.max, a.zoned, a.shown, value, true);
     else paintArc(lcd, cx, cy, a.max, a.zoned, value, a.shown, false);
     a.shown = value;
@@ -184,12 +248,18 @@ void Gauges::drawRpm(const RpmView& v) {
 
     // Most frames only the number moves: send just its box (a small push
     // keeps the panel's frame buffer reads from being starved)
+    char seg[8];
+    segDigits(seg, sizeof(seg), shownRpm, 4, v.live);
     if (sameLook) {
         rpmText.fillScreen(COL_BG);
-        useFont(rpmText, FONT_L);
-        rpmText.setTextDatum(textdatum_t::middle_center);
-        rpmText.setTextColor(rpmColor);
-        rpmText.drawString(buf, RPM_TEXT_W / 2, RPM_TEXT_H / 2);
+        if (retro()) {
+            segText(rpmText, FONT_SEG_SMALL, "8888", seg, RPM_TEXT_W / 2, RPM_TEXT_H / 2, rpmColor);
+        } else {
+            useFont(rpmText, FONT_L);
+            rpmText.setTextDatum(textdatum_t::middle_center);
+            rpmText.setTextColor(rpmColor);
+            rpmText.drawString(buf, RPM_TEXT_W / 2, RPM_TEXT_H / 2);
+        }
         rpmText.pushSprite(&lcd, rpmArc.ox + C - RPM_TEXT_W / 2, rpmArc.oy + C + RPM_TEXT_Y - RPM_TEXT_H / 2);
         return;
     }
@@ -199,13 +269,19 @@ void Gauges::drawRpm(const RpmView& v) {
     clearCentre();
 
     bool haveGear = v.live && v.gear >= 0;
-    useFont(s, FONT_HUGE);
-    s.setTextColor(!haveGear ? COL_LABEL : v.gear == 0 ? COL_NEUTRAL : COL_TEXT);
-    s.drawString(haveGear ? gearLabel(v.gear) : "-", cx, cy - 12);
-
-    useFont(s, FONT_L);
-    s.setTextColor(rpmColor);
-    s.drawString(buf, cx, cy + RPM_TEXT_Y);
+    uint16_t gearColor = !haveGear ? COL_LABEL : v.gear == 0 ? COL_NEUTRAL : COL_TEXT;
+    if (retro()) {
+        const char* g = !haveGear ? "-" : v.gear == 0 ? "n" : gearLabel(v.gear);  // a 7-segment "n"
+        segText(s, FONT_SEG_GEAR, "8", g, cx, cy - 14, gearColor);
+        segText(s, FONT_SEG_SMALL, "8888", seg, cx, cy + RPM_TEXT_Y, rpmColor);
+    } else {
+        useFont(s, FONT_HUGE);
+        s.setTextColor(gearColor);
+        s.drawString(haveGear ? gearLabel(v.gear) : "-", cx, cy - 12);
+        useFont(s, FONT_L);
+        s.setTextColor(rpmColor);
+        s.drawString(buf, cx, cy + RPM_TEXT_Y);
+    }
 
     useFont(s, FONT_S);
     s.setTextColor(COL_LABEL);
@@ -225,11 +301,16 @@ void Gauges::drawSpeed(const SpeedView& v) {
     clearCentre();
 
     char buf[16];
-    if (v.live) snprintf(buf, sizeof(buf), "%d", v.mph);
-    else snprintf(buf, sizeof(buf), "--");
-    useFont(s, FONT_XL);
-    s.setTextColor(v.live ? COL_TEXT : COL_LABEL);
-    s.drawString(buf, cx, cy - 4);
+    if (retro()) {
+        segDigits(buf, sizeof(buf), v.mph, 3, v.live);
+        segText(s, FONT_SEG_SPEED, "888", buf, cx, cy - 4, v.live ? COL_TEXT : COL_LABEL);
+    } else {
+        if (v.live) snprintf(buf, sizeof(buf), "%d", v.mph);
+        else snprintf(buf, sizeof(buf), "--");
+        useFont(s, FONT_XL);
+        s.setTextColor(v.live ? COL_TEXT : COL_LABEL);
+        s.drawString(buf, cx, cy - 4);
+    }
 
     useFont(s, FONT_S);
     s.setTextColor(COL_LABEL);

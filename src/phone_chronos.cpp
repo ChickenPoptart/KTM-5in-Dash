@@ -3,7 +3,10 @@
 //
 // Chronos parses what arrives on the Bluetooth task and calls back from
 // there, so everything it hands over is copied into this file's own state
-// under a lock, and the main loop takes copies of that.
+// under a lock, and the main loop takes copies of that. Its own upkeep
+// (watch->loop) runs in a task of its own on the other core: some of what
+// it sends the app goes out in pieces with pauses between, which froze the
+// gauges for over 2 s each time the phone connected.
 
 #include "phone.h"
 
@@ -134,6 +137,22 @@ static void onConfiguration(Config config, uint32_t a, uint32_t b) {
     xSemaphoreGive(lock);
 }
 
+static const Control CONTROLS[] = {MUSIC_PREVIOUS, MUSIC_TOGGLE, MUSIC_NEXT};
+static volatile int pendingMusic = -1;  // a button press for the phone task to send
+
+static void phoneTask(void*) {
+    for (;;) {
+        watch->loop();
+        setConnected(watch->isConnected());
+        int cmd = pendingMusic;
+        if (cmd >= 0) {
+            pendingMusic = -1;
+            if (watch->isConnected()) watch->musicControl(CONTROLS[cmd]);
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
 void phoneBegin(const char* name) {
     lock = xSemaphoreCreateMutex();
     watch = new ChronosESP32(name);
@@ -143,17 +162,7 @@ void phoneBegin(const char* name) {
     watch->begin();
     watch->setBattery(100);         // the dash runs off the bike
     watch->setNotifyBattery(true);  // ask the phone to send its battery level
-}
-
-void phonePoll() {
-    if (!watch) return;
-    watch->loop();
-    setConnected(watch->isConnected());
-    static bool subscribed = false;
-    if (watch->isSubscribed() != subscribed) {
-        subscribed = !subscribed;
-        Serial.printf("# phone %s the dash's replies\n", subscribed ? "subscribed to" : "unsubscribed from");
-    }
+    xTaskCreatePinnedToCore(phoneTask, "phone", 8192, nullptr, 1, nullptr, 0);  // core 0: off the dash's
 }
 
 void phoneSnapshot(PhoneState& out) {
@@ -175,9 +184,7 @@ bool phoneNextEvent(PhoneEvent& out) {
 }
 
 void phoneMusic(MusicCommand command) {
-    if (!watch || !watch->isConnected()) return;
-    static const Control CONTROLS[] = {MUSIC_PREVIOUS, MUSIC_TOGGLE, MUSIC_NEXT};
-    watch->musicControl(CONTROLS[command]);
+    pendingMusic = command;  // sent by the phone task
 }
 
 const char* weatherName(int icon) {

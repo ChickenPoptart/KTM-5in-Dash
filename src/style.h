@@ -34,6 +34,12 @@ extern uint16_t COL_AMBER;
 extern uint16_t COL_RED;
 extern uint16_t COL_SPEED;
 
+// The look: modern (blue, smooth arcs) or retro (KTM orange, segmented
+// bars and seven-segment digits, like an 80s VFD/LCD dash). Redraw after.
+enum Theme { THEME_MODERN, THEME_RETRO };
+void setTheme(Theme t);
+Theme theme();
+
 // Screen brightness for night riding, 0-100 %. The backlight can only be
 // on or off, so this redraws in darker colours. Redraw the screen after.
 static const int BRIGHTNESS_LEVELS[] = {100, 70, 45, 25};

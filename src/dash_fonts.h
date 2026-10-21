@@ -9,6 +9,16 @@ enum DashFont {
     FONT_L,     // 46 px: time, RPM number, distance to turn
     FONT_XL,    // 118 px digits: speed
     FONT_HUGE,  // 150 px digits and N: gear
+    // Seven-segment (DSEG7) for the retro look. "!" is a blank as wide as
+    // a digit, for right-aligning numbers over their unlit "8"s.
+    FONT_SEG_GEAR,   // 110 px: gear (neutral is "n")
+    FONT_SEG_SPEED,  // 60 px: speed
+    FONT_SEG_SMALL,  // 34 px: RPM number, clock
+    FONT_SEG_BIG,    // 76 px: retro speed and RPM/100
+    FONT_SEG_TINY,   // 26 px: small retro readouts
+    // Fourteen-segment (DSEG14) for retro text: "~" lights every segment
+    FONT_SEG14,      // 22 px
+    FONT_SEG14_S,    // 18 px
 };
 
 // Selects a font on a screen or sprite (reloads only when it changes).

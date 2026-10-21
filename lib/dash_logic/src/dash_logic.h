@@ -23,6 +23,10 @@ bool shiftActive(int rpm);
 enum ShiftStage { SHIFT_NONE, SHIFT_SOON, SHIFT_NOW };
 ShiftStage shiftStage(int rpm, int greenFrom, int redFrom);
 
+// How many of a segmented bar's `count` blocks are lit for value on a
+// 0..max scale: anything above 0 lights at least one, and it's full at max.
+int segmentsLit(int value, int max, int count);
+
 // Which colour zone of the tach bar an RPM falls in.
 enum TachZone { ZONE_OFF, ZONE_IDLE, ZONE_GREEN, ZONE_YELLOW, ZONE_RED, ZONE_COUNT };
 TachZone tachZone(int rpm);

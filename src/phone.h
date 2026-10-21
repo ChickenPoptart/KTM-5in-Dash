@@ -55,7 +55,6 @@ enum MusicCommand { MUSIC_CMD_PREVIOUS, MUSIC_CMD_TOGGLE, MUSIC_CMD_NEXT };
 // Starts advertising under this Bluetooth name. The clock it sets is local
 // time, so set TZ first.
 void phoneBegin(const char* name);
-void phonePoll();                        // call every loop
 void phoneSnapshot(PhoneState& out);     // the latest of everything
 bool phoneNextEvent(PhoneEvent& out);    // oldest first; false when none
 void phoneMusic(MusicCommand command);

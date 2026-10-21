@@ -23,6 +23,7 @@ struct GpsView {
     bool fix = false;
     int satellites = 0;
     int headingDeg = 0;
+    bool altitudeValid = false;  // elevationFt is a real reading (not just a fix)
     int elevationFt = 0;
     int speedMph = 0;
 };
@@ -33,6 +34,9 @@ inline void gpsUpdateView(GpsView& v, const GpsReading& r) {
     v.satellites = r.satellites;
     if (!v.fix) return;
     v.speedMph = (int)(r.speedMph + 0.5);
-    if (r.altitudeValid) v.elevationFt = (int)(r.altitudeFt + 0.5);
+    if (r.altitudeValid) {
+        v.altitudeValid = true;
+        v.elevationFt = (int)(r.altitudeFt + 0.5);
+    }
     if (r.speedMph >= GPS_HEADING_MIN_MPH) v.headingDeg = (int)(r.courseDeg + 0.5) % 360;
 }

@@ -45,3 +45,9 @@ ShiftStage shiftStage(int rpm, int greenFrom, int redFrom) {
     if (rpm >= greenFrom) return SHIFT_SOON;
     return SHIFT_NONE;
 }
+
+int segmentsLit(int value, int max, int count) {
+    if (value <= 0) return 0;
+    if (value >= max) return count;
+    return (int)(((long)value * count + max - 1) / max);  // rounded up
+}

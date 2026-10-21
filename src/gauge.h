@@ -28,6 +28,7 @@ class Gauges {
 public:
     explicit Gauges(LGFX_W5& lcd);
     bool begin();         // allocates the centre buffer; false if out of RAM
+    void end();           // frees it (the retro dash uses the memory)
     void drawDials();     // the parts that never change; call once per page
 
     void drawRpm(const RpmView& v);

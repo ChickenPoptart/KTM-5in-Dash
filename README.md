@@ -23,12 +23,22 @@ decoding was worked out from ride logs.
 - **Bottom bar**: music controls with the phone connected, or ride stats
   (trip, moving time, average and top speed) without it. Calls and messages
   show here as a banner.
-- **Brightness**: the sun icon at the top right dims the screen for night
-  riding.
+- **Brightness and look**: the sun icon at the top right dims the screen for
+  night riding, and switches between the **Modern** dash and a **Retro**
+  one.
+- **Retro**: an 80s digital dash in KTM orange, after the C4 Corvette and
+  Astra GTE. Curved bar-graph tach and speedo, seven-segment digits over
+  their unlit "8"s, fourteen-segment scrolling text, dot-matrix turn arrows,
+  a coolant bar, and a power-on self-test that lights every segment.
+- **More pages**: swipe left for **Trips** (this ride, and Trip 1 and Trip 2
+  kept until you reset them, like a car's) and **Charts** (speed, RPM,
+  coolant and elevation over the whole ride). Double-tap to get back to the
+  dash.
 
-Hold the screen for a second to switch on a demo: a simulated ride, route
-and song for tuning the screen on the bench (tapping steps through the
-phone states: route and music, music only, no phone).
+The bench build (`pio run -e waveshare5_demo -t upload`) adds a demo: hold
+the dash for a second for a simulated ride, route, song, text and call, for
+tuning the screen or recording video. The normal build leaves it out, so a
+long press on the bike can never show fake data.
 
 ## Phone setup (Android)
 
@@ -46,7 +56,10 @@ phone states: route and music, music only, no phone).
   (Android, through the [Chronos](https://chronos.ke/) app): Google Maps
   turn-by-turn with the dash's own arrows, music with working buttons, call
   and message banners, weather and phone battery.
-- **Next:** trip meters (this ride, Trip 1, Trip 2) and ride charts.
+- **Also done:** trip meters, ride charts, the retro look, and a watchdog
+  that restarts the dash if it ever hangs.
+- **Next:** testing on the bike with live CAN data, and a case for the 5"
+  board.
 
 ## Hardware
 
@@ -64,7 +77,8 @@ Wiring to the bike and the GPS: [docs/wiring.md](docs/wiring.md).
 [PlatformIO](https://platformio.org/):
 
 ```
-pio run -e waveshare5 -t upload     # build and flash over USB-C
+pio run -e waveshare5 -t upload       # build and flash over USB-C
+pio run -e waveshare5_demo -t upload  # the bench build, with the demo
 pio test -e native                  # unit tests for the dash logic
 ```
 
@@ -90,4 +104,6 @@ Ride logs contain GPS positions, so `logs/` is never committed.
   other noncommercial use. For commercial use, open an issue with the
   commercial license template.
 - Docs and images: [CC BY-NC-SA 4.0](LICENSE-docs.md).
-- Rajdhani font: SIL Open Font License 1.1 ([src/fonts/OFL.txt](src/fonts/OFL.txt)).
+- Fonts: Rajdhani and DSEG, both SIL Open Font License 1.1
+  ([src/fonts/OFL.txt](src/fonts/OFL.txt),
+  [src/fonts/DSEG-LICENSE.txt](src/fonts/DSEG-LICENSE.txt)).

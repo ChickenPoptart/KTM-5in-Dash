@@ -10,6 +10,7 @@
 
 #include <Arduino.h>
 #include <Preferences.h>
+#include <esp_task_wdt.h>
 #include <Wire.h>
 #include <string.h>
 #include <sys/time.h>
@@ -18,6 +19,7 @@
 #include "can_tracker.h"
 #include "ch422g.h"
 #include "dash_fonts.h"
+#include "field.h"
 #include "dash_logic.h"
 #include "demo_ride.h"
 #include "alert_banner.h"
@@ -34,10 +36,13 @@
 #include "lgfx_w5.h"
 #include "maneuver.h"
 #include "nav_icons.h"
-#include "press_detector.h"
+#include "gesture.h"
+#include "pages.h"
+#include "retro_dash.h"
 #include "ride_clock.h"
 #include "sd_log.h"
 #include "style.h"
+#include "tap_sequencer.h"
 #include "text_wrap.h"
 #include "trip_stats.h"
 
@@ -46,8 +51,25 @@ static const unsigned long STRIP_FRAME_MS = 500;
 static const unsigned long CLOCK_SYNC_MS = 60000;
 static const unsigned long TOUCH_POLL_MS = 15;
 
-static LGFX_W5 lcd;
+LGFX_W5 lcd;  // (field.h and pages.cpp draw on it too)
 static Gauges gauges(lcd);
+static RetroDash retro(lcd);  // the retro look's dash: its own layout and drawing
+
+static bool retroShown() { return theme() == THEME_RETRO && retro.active(); }
+
+// Only one dash's digit buffers fit in internal RAM at once
+static void applyLook() {
+    if (theme() == THEME_RETRO) {
+        gauges.end();
+        if (!retro.begin()) {
+            Serial.println("# retro dash: OUT OF RAM, staying modern");
+            gauges.begin();
+        }
+    } else {
+        retro.end();
+        gauges.begin();
+    }
+}
 static CanTracker canTracker;
 static KtmState ktm;
 static GpsView gpsView;
@@ -56,12 +78,46 @@ static bool clockSet = false;
 static FuelTrip fuel;
 static TripStats trip;      // this ride, from the bike's own data
 static TripStats demoTrip;  // the simulated ride, kept apart from the real one
+static TripStats trip1, trip2;  // car-style trip meters: kept in flash until reset
+static RideCharts charts;       // this ride, from the bike and the GPS
+static RideCharts demoCharts;
+
+// The pages, in swipe order: swipe left for the next, right for the one before
+enum Page { PAGE_DASH, PAGE_TRIPS, PAGE_CHARTS, PAGE_COUNT };
+static int page = PAGE_DASH;
+static bool popupOpen = false;  // a pop-up is up: the page behind it waits
+static void showPage(int p);
 static bool inDemo = false;      // showing the simulated ride right now
 static bool demoEnabled = false; // hold the screen for 1 s to switch the demo on or off
+
+// The demo (a simulated ride, route, song and calls, for tuning the screen
+// and recording videos on the bench) is only in the bench build
+// (pio run -e waveshare5_demo). On the bike a gloved long press must never
+// put fake speed on the dash.
+#ifdef DASH_DEMO
+static const bool DEMO_BUILD = true;
+#else
+static const bool DEMO_BUILD = false;
+#endif
+
+// A frozen dash restarts itself after this long without the loop running
+static const int WATCHDOG_S = 8;
 // Tapping the demo screen steps through what the phone might be doing
 enum DemoPhone { DEMO_ROUTE_AND_MUSIC, DEMO_MUSIC_ONLY, DEMO_NO_PHONE, DEMO_PHONE_STATES };
 static int demoPhone = DEMO_ROUTE_AND_MUSIC;
 static Preferences prefs;  // flash that keeps its contents with the key off
+
+// For tracking down screen jitter: the last heavy thing the dash did, and
+// a log line for every flash write (writing flash briefly stalls the memory
+// the screen is read from)
+static const char* lastHeavy = "";
+static void heavy(const char* what) {
+    lastHeavy = what;
+}
+static void flashWrite(const char* what) {
+    heavy(what);
+    Serial.printf("# flash write: %s at %lu ms\n", what, millis());
+}
 
 // The smooth fonts unpack each glyph on the stack, and a 150 px gear digit
 // takes about 9 KB: more than the default 8 KB loop stack
@@ -123,6 +179,16 @@ static void updateDemoPhone(unsigned long nowMs) {
     phone.weather.icon = 1;
 }
 
+// The demo ride's coolant and road: warming up, then a slow climb and descent
+static int demoCoolantF(unsigned long nowMs) {
+    int warm = 140 + (int)(nowMs / 1000);
+    return warm < 200 ? warm : 200 + (int)(8 * sinf(nowMs / 40000.0f));
+}
+
+static int demoElevationFt(unsigned long nowMs) {
+    return 4600 + (int)(900 * sinf(nowMs / 300000.0f));
+}
+
 // The demo's phone gets a text, and then a call, every 40 s
 static void demoAlerts(unsigned long nowMs) {
     static int lastSecond = -1;
@@ -139,7 +205,10 @@ static void handlePhoneEvents(unsigned long nowMs) {
     while (phoneNextEvent(e)) {
         Serial.printf("# phone event %d: [%s] [%s] [%s]\n", e.type, e.app, e.title, e.text);
         switch (e.type) {
-        case PhoneEvent::CALL_RINGING: banner.callRinging(e.title, nowMs); break;
+        case PhoneEvent::CALL_RINGING:
+            banner.callRinging(e.title, nowMs);
+            if (page != PAGE_DASH && !popupOpen) showPage(PAGE_DASH);  // to see who it is
+            break;
         case PhoneEvent::CALL_ENDED: banner.callEnded(); break;
         case PhoneEvent::MESSAGE: banner.message(e.app, e.title, e.text, nowMs); break;
         case PhoneEvent::CLOCK_SET: clockSet = true; break;
@@ -147,40 +216,6 @@ static void handlePhoneEvents(unsigned long nowMs) {
     }
 }
 
-// ---- Text that only repaints when it changes ----
-
-struct Field {
-    int x, y, w, h;           // box cleared before drawing; text sits in it
-    textdatum_t datum;        // middle_left, middle_center or middle_right
-    DashFont font;
-    const uint16_t& bg;       // (a palette colour, which changes with brightness)
-    char shown[64];
-    uint16_t shownColor;
-
-    void draw(const char* text, uint16_t color) {
-        if (strcmp(text, shown) == 0 && color == shownColor) return;
-        snprintf(shown, sizeof(shown), "%s", text);
-        shownColor = color;
-        lcd.fillRect(x, y - h / 2, w, h, bg);
-        useFont(lcd, font);
-        lcd.setTextDatum(datum);
-        lcd.setTextColor(color, bg);
-        // Shorten anything too long for its box
-        char fit[64];
-        snprintf(fit, sizeof(fit), "%s", text);
-        int len = strlen(fit);
-        while (len > 3 && lcd.textWidth(fit) > w) {
-            fit[--len] = '\0';
-            memcpy(fit + len - 3, "...", 3);
-        }
-        int tx = datum == textdatum_t::middle_left ? x
-               : datum == textdatum_t::middle_right ? x + w : x + w / 2;
-        // The font paints its background a full line high: keep it in the box
-        lcd.setClipRect(x, y - h / 2, w, h);
-        lcd.drawString(fit, tx, y);
-        lcd.clearClipRect();
-    }
-};
 
 static Field fCoolant{48, TOP_STRIP_Y, 80, 34, textdatum_t::middle_left, FONT_M, COL_BG, "", 0};
 static Field fElevation{166, TOP_STRIP_Y, 120, 34, textdatum_t::middle_left, FONT_M, COL_BG, "", 0};
@@ -257,6 +292,12 @@ static void drawPanels() {
 
 // Screen re-laid out from scratch: forget what every field showed
 static void drawScreen() {
+    if (retroShown()) {
+        retro.drawStatic();
+        drawPageDots(PAGE_DASH, PAGE_COUNT);
+        bannerShown = -1;
+        return;
+    }
     lcd.fillScreen(COL_BG);
     gauges.drawDials();
     drawPanels();
@@ -265,16 +306,56 @@ static void drawScreen() {
         f->shown[0] = '\0';
     }
     phoneShown = satShown = playShown = bannerShown = -1;
+    drawPageDots(PAGE_DASH, PAGE_COUNT);
     arrowShown = NO_ARROW;
     centreMode = barMode = -1;
+}
+
+static const TripStats* const* tripColumns() {
+    static const TripStats* cols[TRIP_COLUMNS];
+    cols[TRIP_RIDE] = inDemo ? &demoTrip : &trip;
+    cols[TRIP_1] = &trip1;
+    cols[TRIP_2] = &trip2;
+    return cols;
+}
+
+// The current page, from scratch
+static void drawPage() {
+    heavy("full page draw");
+    if (page == PAGE_DASH) {
+        drawScreen();
+        return;
+    }
+    lcd.fillScreen(COL_BG);
+    if (page == PAGE_TRIPS) drawTripsPage(true, tripColumns());
+    else drawChartsPage(true, inDemo ? demoCharts : charts);
+    drawPageDots(page, PAGE_COUNT);
+}
+
+static void showPage(int p) {
+    page = p;
+    drawPage();
+}
+
+// Trip 1 and Trip 2 in flash, as they are in memory (sizes checked, so a
+// firmware change to TripStats starts them afresh rather than misreading)
+static void loadTrip(const char* key, TripStats& t) {
+    if (prefs.isKey(key) && prefs.getBytesLength(key) == sizeof(TripStats)) prefs.getBytes(key, &t, sizeof(t));
+}
+
+static void saveTrips() {
+    flashWrite("trip meters");
+    prefs.putBytes("trip1", &trip1, sizeof(trip1));
+    prefs.putBytes("trip2", &trip2, sizeof(trip2));
 }
 
 static void bootHardware() {
     Serial.begin(115200);
     delay(1500);  // let the USB serial port come up
-    Serial.println("# 5\" dash");
+    Serial.printf("# 5\" dash, built %s %s%s\n", __DATE__, __TIME__, DEMO_BUILD ? " (bench build, with demo)" : "");
     prefs.begin("dash");
     setBrightness(prefs.getInt("bright", 100));
+    setTheme(prefs.getUChar("theme", THEME_MODERN) == THEME_RETRO ? THEME_RETRO : THEME_MODERN);
     setenv("TZ", MOUNTAIN_TZ, 1);
     tzset();
 
@@ -286,11 +367,13 @@ static void bootHardware() {
     Serial.printf("# display %s\n", lcd.init() ? "ok" : "FAILED");
     lcd.fillScreen(COL_BG);
     ch422gWrite(EXIO_BACKLIGHT, true);
-    Serial.printf("# gauges %s\n", gauges.begin() ? "ok" : "OUT OF RAM");
+    applyLook();
+    Serial.printf("# dash: %s\n", retroShown() ? "retro" : "modern");
     compass.setPsram(false);
     compass.setColorDepth(16);
     if (!compass.createSprite(COMPASS_SIZE, COMPASS_SIZE)) Serial.println("# compass: OUT OF RAM");
     drawScreen();
+    if (retroShown()) retro.selfTest();  // all segments on, like an 80s dash at key-on
     Serial.printf("# touch %s\n", gt911Begin() ? "ok" : "NOT RESPONDING");
 
     ch422gWrite(EXIO_SD_CS, true);  // SD mode: the card's D3 line must be high
@@ -300,14 +383,19 @@ static void bootHardware() {
     gpsBegin();
     phoneBegin("KTM Dash");
     Serial.println("# phone: advertising as KTM Dash");
-    demoEnabled = prefs.getBool("demo", false);
+    demoEnabled = DEMO_BUILD && prefs.getBool("demo", false);
     if (prefs.isKey("fuelMi")) fuel.restore(prefs.getDouble("fuelMi"));
     Serial.printf("# %.1f mi since gas fill\n", fuel.miles());
+    loadTrip("trip1", trip1);
+    loadTrip("trip2", trip2);
+    Serial.printf("# trip 1 %.1f mi, trip 2 %.1f mi\n", trip1.miles(), trip2.miles());
     Serial.printf("# free internal RAM %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 }
 
 void setup() {
     bootHardware();
+    esp_task_wdt_init(WATCHDOG_S, true);  // reboot if the loop stops
+    esp_task_wdt_add(nullptr);
 }
 
 // Clock from GPS time; also gives SD log files real dates
@@ -336,6 +424,11 @@ static void drawTopStrip(bool demoMode, unsigned long nowMs) {
 
     if (clockSet) formatClock(buf, sizeof(buf), time(nullptr));
     else snprintf(buf, sizeof(buf), demoMode ? "12:25 PM" : "--:--");
+    fTime.font = theme() == THEME_RETRO ? FONT_SEG_SMALL : FONT_L;
+    if (theme() == THEME_RETRO) {  // seven-segment: digits only, no AM/PM
+        char* space = strchr(buf, ' ');
+        if (space) *space = '\0';
+    }
     fTime.draw(buf, COL_TEXT);
 
     bool linked = phone.connected;
@@ -589,6 +682,63 @@ static void drawStatsBar() {
     fStat[3].draw(buf, COL_TEXT);
 }
 
+// ---- The retro dash: everything it shows, gathered in one place ----
+
+static void fillRetroView(RetroView& v, unsigned long nowMs) {
+    bool d = inDemo;
+    v.rpm = d ? demo.rpm : ktm.rpm;
+    v.rpmLive = d || ktmRpmLive(ktm, nowMs);
+    v.gear = d ? demo.gear : (ktmGearLive(ktm, nowMs) ? ktm.gear : -1);
+    v.shift = shiftStage(v.rpm, SHIFT_SOON_RPM, SHIFT_NOW_RPM);
+    v.flashOn = (nowMs / SHIFT_FLASH_MS) % 2 == 0;
+    v.mph = d ? demo.mph : ktm.speedMph;
+    v.speedLive = d || ktmSpeedLive(ktm, nowMs);
+    v.fuelTenths = (int)(fuel.miles() * 10 + 1e-6);
+    v.coolantLive = d || ktmCoolantLive(ktm, nowMs);
+    v.coolantF = d ? demoCoolantF(nowMs) : ktm.coolantF;
+    char clk[16];
+    if (clockSet) formatClock(clk, sizeof(clk), time(nullptr));
+    else snprintf(clk, sizeof(clk), d ? "12:25 PM" : "--:--");
+    char* space = strchr(clk, ' ');  // seven segments: no AM/PM
+    if (space) *space = '\0';
+    snprintf(v.clock, sizeof(v.clock), "%s", clk);
+    v.satellites = gpsView.satellites;
+    v.gpsFix = gpsView.fix;
+    v.phone = phone.connected;
+    v.phoneBattery = phone.battery;
+
+    const NavView& n = phone.nav;
+    v.route = n.active;
+    v.maneuver = maneuverFor(n.street);
+    v.phoneIcon = n.hasIcon ? n.icon : nullptr;
+    v.phoneIconId = n.iconId;
+    snprintf(v.distance, sizeof(v.distance), "%s", n.distance);
+    snprintf(v.street, sizeof(v.street), "%s", n.street);
+    snprintf(v.eta, sizeof(v.eta), "%s", n.eta);
+    char left[32];
+    snprintf(v.left, sizeof(v.left), "%s", routeLeft(n, left, sizeof(left)));
+
+    Heading h = currentHeading(nowMs);
+    v.headingKnown = h.known;
+    v.headingLive = h.live;
+    v.headingDeg = h.deg;
+    v.altitudeKnown = d || (gpsView.fix && gpsView.altitudeValid);
+    v.elevationFt = d ? demoElevationFt(nowMs) : gpsView.elevationFt;
+
+    v.musicBar = showMusicBar();
+    v.playing = phone.music.playing;
+    snprintf(v.title, sizeof(v.title), "%s", phone.music.title);
+    snprintf(v.artist, sizeof(v.artist), "%s", phone.music.artist);
+    const TripStats& t = d ? demoTrip : trip;
+    v.tripMiles = t.miles();
+    v.tripTopMph = t.maxSpeedMph();
+
+    v.alert = banner.visible(nowMs);
+    v.alertIsCall = banner.kind() == ALERT_CALL;
+    snprintf(v.alertFrom, sizeof(v.alertFrom), "%s", banner.title());
+    snprintf(v.alertText, sizeof(v.alertText), "%s", banner.text());
+}
+
 // ---- Calls and messages: a banner over the bottom bar ----
 
 static Field fBannerTitle{92, BS_MID - 13, 540, 32, textdatum_t::middle_left, FONT_M, COL_PANEL, "", 0};
@@ -652,12 +802,12 @@ static const Box BTN_YES{204, 282, 188, 74};   // big and far apart for gloves
 static const Box BTN_NO{408, 282, 188, 74};
 static const unsigned long POPUP_TIMEOUT_MS = 10000;  // closes itself, changing nothing
 
-enum PopupKind { POPUP_FUEL, POPUP_BRIGHTNESS };
-static bool popupOpen = false;
+enum PopupKind { POPUP_FUEL, POPUP_TRIP, POPUP_BRIGHTNESS };
 static PopupKind popupKind = POPUP_FUEL;
 static unsigned long popupMs = 0;
 
 static void saveFuel() {
+    flashWrite("gas count");
     prefs.putDouble("fuelMi", fuel.miles());
     fuel.markSaved();
 }
@@ -668,20 +818,22 @@ static void button(const Box& b, const char* label, uint16_t color) {
     lcd.drawString(label, b.x + b.w / 2, b.y + b.h / 2);
 }
 
-static void openFuelPopup(unsigned long nowMs) {
+// "Do you want to reset ...?" with the count it would clear, and Yes / No
+static void openResetPopup(PopupKind kind, const char* line1, const char* line2, double miles,
+                           unsigned long nowMs) {
     popupOpen = true;
-    popupKind = POPUP_FUEL;
+    popupKind = kind;
     popupMs = nowMs;
     lcd.fillSmoothRoundRect(POPUP.x - 2, POPUP.y - 2, POPUP.w + 4, POPUP.h + 4, 20, COL_PANEL_EDGE);
     lcd.fillSmoothRoundRect(POPUP.x, POPUP.y, POPUP.w, POPUP.h, 18, COL_PANEL);
-    iconFuel(lcd, 400, POPUP.y + 30, COL_ACCENT, COL_PANEL);
+    if (kind == POPUP_FUEL) iconFuel(lcd, 400, POPUP.y + 30, COL_ACCENT, COL_PANEL);
     useFont(lcd, FONT_M);
     lcd.setTextDatum(textdatum_t::middle_center);
     lcd.setTextColor(COL_TEXT, COL_PANEL);
-    lcd.drawString("Do you want to reset", 400, POPUP.y + 72);
-    lcd.drawString("miles since gas fill?", 400, POPUP.y + 104);
+    lcd.drawString(line1, 400, POPUP.y + 72);
+    lcd.drawString(line2, 400, POPUP.y + 104);
     char buf[24];
-    snprintf(buf, sizeof(buf), "%.1f mi", fuel.miles());
+    snprintf(buf, sizeof(buf), "%.1f mi", miles);
     useFont(lcd, FONT_L);
     lcd.setTextColor(COL_ACCENT, COL_PANEL);
     lcd.drawString(buf, 400, POPUP.y + 150);
@@ -690,9 +842,21 @@ static void openFuelPopup(unsigned long nowMs) {
     button(BTN_NO, "No", COL_PANEL_EDGE);
 }
 
+static void openFuelPopup(unsigned long nowMs) {
+    openResetPopup(POPUP_FUEL, "Do you want to reset", "miles since gas fill?", fuel.miles(), nowMs);
+}
+
+static int resettingTrip = TRIP_1;  // which one the trip pop-up is asking about
+
+static void openTripResetPopup(int which, unsigned long nowMs) {
+    resettingTrip = which;
+    const TripStats& t = which == TRIP_1 ? trip1 : trip2;
+    openResetPopup(POPUP_TRIP, "Do you want to reset", which == TRIP_1 ? "Trip 1?" : "Trip 2?", t.miles(), nowMs);
+}
+
 static void closePopup() {
     popupOpen = false;
-    drawScreen();
+    drawPage();
 }
 
 // ---- Brightness: the sun at the top right ----
@@ -700,6 +864,12 @@ static void closePopup() {
 static const Box BRIGHT_TAP{BRIGHT_ICON_X - 34, 0, 800 - (BRIGHT_ICON_X - 34), GAUGE_Y};
 static const int LEVELS = sizeof(BRIGHTNESS_LEVELS) / sizeof(BRIGHTNESS_LEVELS[0]);
 static const int LEVEL_W = 92, LEVEL_GAP = 12, LEVEL_H = 100;
+
+static const int THEME_W = 196, THEME_H = 54;
+static Box themeButton(int t) {  // THEME_MODERN or THEME_RETRO
+    int x0 = POPUP.x + (POPUP.w - 2 * THEME_W - LEVEL_GAP) / 2;
+    return Box{x0 + t * (THEME_W + LEVEL_GAP), POPUP.y + 204, THEME_W, THEME_H};
+}
 
 static Box levelButton(int i) {
     int x0 = POPUP.x + (POPUP.w - LEVELS * LEVEL_W - (LEVELS - 1) * LEVEL_GAP) / 2;
@@ -722,14 +892,28 @@ static void openBrightnessPopup(unsigned long nowMs) {
         snprintf(label, sizeof(label), "%d%%", BRIGHTNESS_LEVELS[i]);
         button(levelButton(i), label, BRIGHTNESS_LEVELS[i] == brightness() ? COL_ACCENT : COL_PANEL_EDGE);
     }
+    button(themeButton(THEME_MODERN), "Modern", theme() == THEME_MODERN ? COL_ACCENT : COL_PANEL_EDGE);
+    button(themeButton(THEME_RETRO), "Retro", theme() == THEME_RETRO ? COL_ACCENT : COL_PANEL_EDGE);
     useFont(lcd, FONT_S);
     lcd.setTextColor(COL_LABEL, COL_PANEL);
-    lcd.drawString("Tap outside to close", 400, POPUP.y + POPUP.h - 30);
+    lcd.drawString("Tap outside to close", 400, POPUP.y + POPUP.h - 10);
+}
+
+// A look was picked: the whole screen redraws in it
+static void pickTheme(Theme t) {
+    setTheme(t);
+    applyLook();
+    flashWrite("theme");
+    prefs.putUChar("theme", t);
+    Serial.printf("# theme %s\n", retroShown() ? "retro" : "modern");
+    closePopup();
+    if (retroShown() && page == PAGE_DASH) retro.selfTest();
 }
 
 // A level was picked: the whole screen redraws at it
 static void pickBrightness(int percent) {
     setBrightness(percent);
+    flashWrite("brightness");
     prefs.putInt("bright", percent);
     Serial.printf("# brightness %d%%\n", percent);
     closePopup();
@@ -743,17 +927,52 @@ static void onTap(int x, int y, unsigned long nowMs) {
                 return;
             }
         }
+        for (Theme t : {THEME_MODERN, THEME_RETRO}) {
+            if (themeButton(t).contains(x, y)) {
+                pickTheme(t);
+                return;
+            }
+        }
         if (!POPUP.contains(x, y)) closePopup();
         return;
     }
     if (popupOpen) {
         if (BTN_YES.contains(x, y)) {
-            fuel.reset();
-            saveFuel();
+            if (popupKind == POPUP_FUEL) {
+                fuel.reset();
+                saveFuel();
+            } else {
+                (resettingTrip == TRIP_1 ? trip1 : trip2) = TripStats();
+                saveTrips();
+            }
             closePopup();
         } else if (BTN_NO.contains(x, y)) {
             closePopup();
         }
+        return;
+    }
+    if (retroShown()) {
+        RetroView v;
+        fillRetroView(v, nowMs);
+        RetroTap tap = retro.tapAt(x, y, v);
+        MusicCommand cmd = MUSIC_CMD_TOGGLE;
+        switch (tap) {
+        case RETRO_TAP_BRIGHTNESS: openBrightnessPopup(nowMs); return;
+        case RETRO_TAP_FUEL: openFuelPopup(nowMs); return;
+        case RETRO_TAP_PREVIOUS: cmd = MUSIC_CMD_PREVIOUS; break;
+        case RETRO_TAP_NEXT: cmd = MUSIC_CMD_NEXT; break;
+        case RETRO_TAP_PLAY: break;
+        case RETRO_TAP_BOTTOM:
+            if (v.alert) banner.dismiss();
+            else if (phone.connected) barChoice = showMusicBar() ? BAR_STATS : BAR_MUSIC;
+            else if (inDemo) demoPhone = (demoPhone + 1) % DEMO_PHONE_STATES;
+            return;
+        default:
+            if (inDemo) demoPhone = (demoPhone + 1) % DEMO_PHONE_STATES;
+            return;
+        }
+        if (realPhone && !inDemo) phoneMusic(cmd);
+        else if (cmd == MUSIC_CMD_TOGGLE) demoPlaying = !demoPlaying;
         return;
     }
     if (BRIGHT_TAP.contains(x, y)) {
@@ -777,7 +996,7 @@ static void onTap(int x, int y, unsigned long nowMs) {
             barChoice = BAR_STATS;
             return;
         }
-        if (realPhone) phoneMusic(cmd);
+        if (realPhone && !inDemo) phoneMusic(cmd);
         else if (cmd == MUSIC_CMD_TOGGLE) demoPlaying = !demoPlaying;
         return;
     }
@@ -785,37 +1004,69 @@ static void onTap(int x, int y, unsigned long nowMs) {
         barChoice = BAR_MUSIC;
         return;
     }
-    if (inDemo && !realPhone) demoPhone = (demoPhone + 1) % DEMO_PHONE_STATES;
+    if (inDemo) demoPhone = (demoPhone + 1) % DEMO_PHONE_STATES;
 }
 
-// Taps, at the spot the finger first came down
+// Taps on the pages other than the dash (single taps there wait a moment,
+// in case it's a double tap back to the dash)
+static void onPageTap(int x, int y, unsigned long nowMs) {
+    if (page == PAGE_TRIPS) {
+        int which = tripResetAt(x, y);
+        if (which >= 0) openTripResetPopup(which, nowMs);
+    }
+}
+
 static void pollTouch(unsigned long nowMs) {
-    static PressDetector press;
-    static bool wasTouching = false;
-    static int downX = 0, downY = 0;
-    int x, y;
+    static GestureTracker gestures;
+    static TapSequencer taps;
+    int x = 0, y = 0;
     bool touching = gt911Read(x, y);
-    if (touching && !wasTouching) {
-        downX = x;
-        downY = y;
+    Gesture g = gestures.update(touching, x, y, nowMs);
+    if (popupOpen) {
+        if (g.kind == GESTURE_TAP) onTap(g.x, g.y, nowMs);
+        return;
     }
-    wasTouching = touching;
-    PressEvent e = press.update(touching, nowMs);
-    if (e == PRESS_TAP) onTap(downX, downY, nowMs);
-    if (e == PRESS_LONG && !popupOpen) {  // demo on or off, remembered
-        demoEnabled = !demoEnabled;
-        prefs.putBool("demo", demoEnabled);
-        Serial.printf("# demo %s\n", demoEnabled ? "on" : "off");
-        drawScreen();
+    switch (g.kind) {
+    case GESTURE_SWIPE_LEFT:
+        if (page + 1 < PAGE_COUNT) showPage(page + 1);
+        return;
+    case GESTURE_SWIPE_RIGHT:
+        if (page > 0) showPage(page - 1);
+        return;
+    case GESTURE_HOLD:
+        if (DEMO_BUILD && page == PAGE_DASH) {  // demo on or off, remembered
+            demoEnabled = !demoEnabled;
+            flashWrite("demo setting");
+            prefs.putBool("demo", demoEnabled);
+            Serial.printf("# demo %s\n", demoEnabled ? "on" : "off");
+            drawScreen();
+            if (demoEnabled && retroShown()) retro.selfTest();
+        }
+        return;
+    case GESTURE_TAP:
+        if (page == PAGE_DASH) onTap(g.x, g.y, nowMs);  // straight away: buttons feel instant
+        else taps.tap(nowMs, g.x, g.y);
+        break;
+    default:
+        break;
     }
+    TapResult t = taps.poll(nowMs);
+    if (t.kind == TAP_DOUBLE) showPage(PAGE_DASH);
+    else if (t.kind == TAP_SINGLE) onPageTap(t.x, t.y, nowMs);
 }
 
 void loop() {
+    esp_task_wdt_reset();
     unsigned long now = millis();
+    static unsigned long passStartMs = 0;
+    if (passStartMs && now - passStartMs > 40) {
+        Serial.printf("# slow loop %lu ms at %lu ms (last: %s)\n", now - passStartMs, now, lastHeavy);
+    }
+    passStartMs = now;
+    lastHeavy = "";
     canPoll(canTracker, ktm, now);
     canTracker.updateRates(now);
     gpsPoll();
-    phonePoll();
 
     static unsigned long lastGpsMs = 0;
     if (now - lastGpsMs >= 100) {
@@ -837,14 +1088,49 @@ void loop() {
         sample.rpm = ktm.rpm;
         sample.coolantLive = ktmCoolantLive(ktm, now);
         sample.coolantF = ktm.coolantF;
+        sample.elevationValid = gpsView.fix && gpsView.altitudeValid;
+        sample.elevationFt = gpsView.elevationFt;
         trip.update(dt, sample);
+        if (sample.rpmLive || sample.speedLive) {  // trip meters count only with the bike on
+            trip1.update(dt, sample);
+            trip2.update(dt, sample);
+        }
+        static unsigned long lastTripSaveMs = 0, savedMovingMs = 0;
+        if (now - lastTripSaveMs >= 60000) {  // at most once a minute, and only after riding
+            lastTripSaveMs = now;
+            if (trip1.movingMs() != savedMovingMs) {
+                savedMovingMs = trip1.movingMs();
+                saveTrips();
+            }
+        }
         if (inDemo) {  // the simulated ride
             TripSample d;
             d.speedLive = d.rpmLive = true;
             d.speedMph = demo.mph;
             d.rpm = demo.rpm;
+            d.coolantLive = true;
+            d.coolantF = demoCoolantF(now);
+            d.elevationValid = true;
+            d.elevationFt = demoElevationFt(now);
             demoTrip.update(dt, d);
         }
+    }
+
+    // Chart samples: the bike and GPS, with gaps where there's no data
+    static unsigned long lastChartMs = 0;
+    if (now - lastChartMs >= CHART_SAMPLE_MS) {
+        lastChartMs = now;
+        charts.speed.add(ktmSpeedLive(ktm, now) ? ktm.speedMph : CHART_NO_DATA);
+        charts.rpm.add(ktmRpmLive(ktm, now) ? ktm.rpm : CHART_NO_DATA);
+        charts.coolant.add(ktmCoolantLive(ktm, now) ? ktm.coolantF : CHART_NO_DATA);
+        charts.elevation.add(gpsView.fix && gpsView.altitudeValid ? gpsView.elevationFt : CHART_NO_DATA);
+        if (inDemo) {
+            demoCharts.speed.add(demo.mph);
+            demoCharts.rpm.add(demo.rpm);
+            demoCharts.coolant.add(demoCoolantF(now));
+            demoCharts.elevation.add(demoElevationFt(now));
+        }
+        if (page == PAGE_CHARTS && !popupOpen) drawChartsPage(false, inDemo ? demoCharts : charts);
     }
 
     static unsigned long lastTouchMs = 0;
@@ -871,7 +1157,7 @@ void loop() {
             Serial.printf("# phone %s\n", live.connected ? "connected" : "disconnected");
         }
         realPhone = live.connected;
-        if (realPhone) {
+        if (realPhone && !demoMode) {  // (the demo takes over the phone too, for showing off)
             // What the phone sends, as it changes: for checking the link
             if (strcmp(live.nav.distance, phone.nav.distance) || strcmp(live.nav.street, phone.nav.street) ||
                 live.nav.active != phone.nav.active) {
@@ -891,7 +1177,27 @@ void loop() {
         else if (demoMode) updateDemoPhone(now);
         else clearPhone();
         handlePhoneEvents(now);
-        if (!realPhone && demoMode && phone.connected) demoAlerts(now);
+        if (demoMode && phone.connected) demoAlerts(now);
+    }
+
+    if (page != PAGE_DASH) {
+        static unsigned long lastPageMs = 0;
+        if (page == PAGE_TRIPS && now - lastPageMs >= 1000) {
+            lastPageMs = now;
+            drawTripsPage(false, tripColumns());
+        }
+        return;
+    }
+
+    if (retroShown()) {
+        static unsigned long lastRetroMs = 0;
+        if (now - lastRetroMs >= GAUGE_FRAME_MS) {
+            lastRetroMs = now;
+            RetroView v;
+            fillRetroView(v, now);
+            retro.update(v, now);
+        }
+        return;
     }
 
     static unsigned long lastGaugeMs = 0;

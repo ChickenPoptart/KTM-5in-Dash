@@ -95,6 +95,13 @@ void test_heading_normalizes_out_of_range() {
     TEST_ASSERT_EQUAL_STRING("W", headingCardinal(-90));
 }
 
+void test_segmented_bars_light_from_the_first_rpm_to_the_end_of_the_scale() {
+    TEST_ASSERT_EQUAL(0, segmentsLit(0, 10000, 50));
+    TEST_ASSERT_EQUAL(1, segmentsLit(1, 10000, 50));      // anything at all shows
+    TEST_ASSERT_EQUAL(50, segmentsLit(10000, 10000, 50));
+    TEST_ASSERT_EQUAL(50, segmentsLit(12000, 10000, 50));  // past the end of the scale
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_tach_is_dark_with_engine_off);
@@ -111,5 +118,6 @@ int main() {
     RUN_TEST(test_heading_cardinals);
     RUN_TEST(test_heading_rounds_to_nearest_cardinal);
     RUN_TEST(test_heading_normalizes_out_of_range);
+    RUN_TEST(test_segmented_bars_light_from_the_first_rpm_to_the_end_of_the_scale);
     return UNITY_END();
 }
