@@ -11,25 +11,34 @@ constexpr uint16_t rgb(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 // ---- Palette ----
-constexpr uint16_t COL_BG = rgb(0x06, 0x0A, 0x14);          // near-black navy
-constexpr uint16_t COL_PANEL = rgb(0x0E, 0x14, 0x24);       // centre/bottom panels
-constexpr uint16_t COL_PANEL_EDGE = rgb(0x22, 0x2C, 0x48);
-constexpr uint16_t COL_RING = rgb(0x4A, 0x6C, 0xF7);        // outer ring blue
-constexpr uint16_t COL_RING_GLOW = rgb(0x14, 0x1E, 0x4A);   // soft halo behind it
-constexpr uint16_t COL_TRACK = rgb(0x1A, 0x20, 0x30);       // unlit part of an arc
-constexpr uint16_t COL_TICK = rgb(0x8A, 0x94, 0xA8);
-constexpr uint16_t COL_TICK_LABEL = rgb(0xA8, 0xB0, 0xC0);
-constexpr uint16_t COL_TEXT = rgb(0xFF, 0xFF, 0xFF);
-constexpr uint16_t COL_LABEL = rgb(0x70, 0x7C, 0x94);
-constexpr uint16_t COL_ACCENT = rgb(0x4A, 0x9C, 0xFF);      // icons, speed arc
-constexpr uint16_t COL_NEUTRAL = rgb(0x3C, 0xE0, 0x6C);     // "N" in green
+// The colours everything is drawn in, at the brightness picked on the
+// brightness pop-up (see setBrightness). Full-brightness values are in
+// style.cpp.
+extern uint16_t COL_BG;          // near-black navy
+extern uint16_t COL_PANEL;       // centre/bottom panels
+extern uint16_t COL_PANEL_EDGE;
+extern uint16_t COL_RING;        // outer ring blue
+extern uint16_t COL_RING_GLOW;   // soft halo behind it
+extern uint16_t COL_TRACK;       // unlit part of an arc
+extern uint16_t COL_TICK;
+extern uint16_t COL_TICK_LABEL;
+extern uint16_t COL_TEXT;
+extern uint16_t COL_LABEL;
+extern uint16_t COL_ACCENT;      // icons, speed arc
+extern uint16_t COL_NEUTRAL;     // "N" in green
 
 // RPM zone colours: lit, and shown at quarter brightness on the unlit track
-constexpr uint16_t COL_IDLE = rgb(0x00, 0xD8, 0xFF);
-constexpr uint16_t COL_GREEN = rgb(0x3C, 0xE0, 0x6C);
-constexpr uint16_t COL_AMBER = rgb(0xFF, 0xB0, 0x00);
-constexpr uint16_t COL_RED = rgb(0xFF, 0x2A, 0x2A);
-constexpr uint16_t COL_SPEED = COL_ACCENT;
+extern uint16_t COL_IDLE;
+extern uint16_t COL_GREEN;
+extern uint16_t COL_AMBER;
+extern uint16_t COL_RED;
+extern uint16_t COL_SPEED;
+
+// Screen brightness for night riding, 0-100 %. The backlight can only be
+// on or off, so this redraws in darker colours. Redraw the screen after.
+static const int BRIGHTNESS_LEVELS[] = {100, 70, 45, 25};
+void setBrightness(int percent);
+int brightness();
 
 // ---- RPM gauge ----
 constexpr int RPM_MAX = 10000;          // top of the scale

@@ -21,19 +21,32 @@ decoding was worked out from ride logs.
 - **Top strip**: coolant temperature, elevation, time, phone battery, and
   GPS satellites.
 - **Bottom bar**: music controls with the phone connected, or ride stats
-  (trip, moving time, average and top speed) without it.
+  (trip, moving time, average and top speed) without it. Calls and messages
+  show here as a banner.
+- **Brightness**: the sun icon at the top right dims the screen for night
+  riding.
 
-With no bike data coming in, it plays a simulated ride so the screen can be
-tuned on the bench. Tapping the screen in the demo steps through the phone
-states: route and music, music only, no phone.
+Hold the screen for a second to switch on a demo: a simulated ride, route
+and song for tuning the screen on the bench (tapping steps through the
+phone states: route and music, music only, no phone).
+
+## Phone setup (Android)
+
+1. Install **Chronos** from the Play Store and allow its permissions,
+   including notification access. Give Google Maps notification access too.
+2. Pair from inside Chronos (Watches → Pair new device → **KTM Dash**), not
+   from Android's Bluetooth settings.
+3. In Chronos, under the watch's **ESP32 Manager**, set **Navigation** to
+   Enabled.
 
 ## Status
 
 - **Done:** display, touch, CAN, GPS, SD logging, the main screen, the shift
-  light and miles since gas fill.
-- **Next:** the Bluetooth link to an Android phone (navigation, music, calls,
-  texts, weather). Until then, the phone data on screen is the demo's
-  sample data.
+  light, miles since gas fill, screen brightness, and the phone link
+  (Android, through the [Chronos](https://chronos.ke/) app): Google Maps
+  turn-by-turn with the dash's own arrows, music with working buttons, call
+  and message banners, weather and phone battery.
+- **Next:** trip meters (this ride, Trip 1, Trip 2) and ride charts.
 
 ## Hardware
 

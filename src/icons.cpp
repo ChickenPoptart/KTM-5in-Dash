@@ -61,6 +61,27 @@ void iconFuel(lgfx::LGFXBase& g, int x, int y, uint16_t color, uint16_t bg) {
     g.fillRect(x + 7, y - 10, 4, 5, color);                  // nozzle
 }
 
+// A lightning bolt small enough to sit on iconPhone's screen
+void iconCharging(lgfx::LGFXBase& g, int x, int y, uint16_t color) {
+    g.fillTriangle(x + 2, y - 9, x - 4, y + 1, x + 1, y + 1, color);
+    g.fillTriangle(x - 1, y - 1, x + 4, y - 1, x - 2, y + 9, color);
+}
+
+// A speech bubble with three dots
+void iconMessage(lgfx::LGFXBase& g, int x, int y, uint16_t color, uint16_t bg) {
+    g.fillSmoothRoundRect(x - 16, y - 13, 32, 22, 7, color);
+    g.fillTriangle(x - 9, y + 7, x - 2, y + 7, x - 12, y + 15, color);
+    for (int i = -1; i <= 1; i++) g.fillCircle(x + i * 8, y - 2, 2, bg);
+}
+
+void iconBrightness(lgfx::LGFXBase& g, int x, int y, uint16_t color) {
+    g.fillSmoothCircle(x, y, 7, color);
+    for (int i = 0; i < 8; i++) {
+        float a = i * (float)M_PI / 4;
+        g.drawWideLine(x + cosf(a) * 11, y + sinf(a) * 11, x + cosf(a) * 15, y + sinf(a) * 15, 1.3f, color);
+    }
+}
+
 // Like the satellite in the Pixel's satellite-messaging icon: a body with a
 // solar panel either side, tilted 45 degrees, sending signal waves
 void iconSatellite(lgfx::LGFXBase& g, int x, int y, uint16_t color) {

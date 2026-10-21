@@ -47,6 +47,7 @@ private:
 
     LGFX_W5& lcd;
     LGFX_Sprite centre;   // internal RAM, reused for both gauges
+    LGFX_Sprite rpmText;  // just the RPM number, for when only that changes
     ArcState rpmArc, speedArc;
     RpmView lastRpm{-1, -2, false, SHIFT_NONE, false};
     SpeedView lastSpeed{-1, false, -1};

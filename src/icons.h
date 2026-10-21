@@ -9,6 +9,9 @@ void iconCoolant(lgfx::LGFXBase& g, int x, int y, uint16_t color);
 void iconMountain(lgfx::LGFXBase& g, int x, int y, uint16_t color);
 void iconPhone(lgfx::LGFXBase& g, int x, int y, uint16_t color, uint16_t bg);
 void iconFuel(lgfx::LGFXBase& g, int x, int y, uint16_t color, uint16_t bg);
+void iconCharging(lgfx::LGFXBase& g, int x, int y, uint16_t color);  // fits in iconPhone
+void iconMessage(lgfx::LGFXBase& g, int x, int y, uint16_t color, uint16_t bg);
+void iconBrightness(lgfx::LGFXBase& g, int x, int y, uint16_t color);  // a sun
 void iconSatellite(lgfx::LGFXBase& g, int x, int y, uint16_t color);
 
 void iconPrevious(lgfx::LGFXBase& g, int x, int y, uint16_t color);

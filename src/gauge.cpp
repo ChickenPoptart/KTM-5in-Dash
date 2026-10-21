@@ -17,6 +17,11 @@ static const int CENTRE_H = CENTRE_TOP + 116;
 static const int GAP_RADIUS = 116;    // how far down into the gap it reaches
 static const uint16_t KEY = rgb(0xFF, 0x00, 0xFF);
 
+// The RPM number's box, below the gear: inside the circle and the gap, so
+// it can be pushed on its own without touching the arc
+static const int RPM_TEXT_W = 150, RPM_TEXT_H = 48;
+static const int RPM_TEXT_Y = 58;  // centre, below the gauge centre
+
 // A quarter-brightness version of a colour, for the unlit track
 static uint16_t dim(uint16_t c) {
     uint16_t r = (c >> 11) & 0x1F, g = (c >> 5) & 0x3F, b = c & 0x1F;
@@ -43,7 +48,7 @@ static void arc(LGFX_W5& g, int cx, int cy, int r0, int r1, float a0, float a1, 
     }
 }
 
-struct Zone { int from, to; uint16_t color; };
+struct Zone { int from, to; const uint16_t& color; };  // (palette changes with brightness)
 static const Zone RPM_ZONES[] = {
     {0, RPM_GREEN_FROM, COL_IDLE},
     {RPM_GREEN_FROM, RPM_AMBER_FROM, COL_GREEN},
@@ -51,7 +56,7 @@ static const Zone RPM_ZONES[] = {
     {RPM_RED_FROM, RPM_MAX, COL_RED},
 };
 
-Gauges::Gauges(LGFX_W5& lcd) : lcd(lcd), centre(&lcd) {
+Gauges::Gauges(LGFX_W5& lcd) : lcd(lcd), centre(&lcd), rpmText(&lcd) {
     rpmArc.ox = RPM_GAUGE_X;
     rpmArc.oy = GAUGE_Y;
     rpmArc.max = RPM_MAX;
@@ -65,7 +70,10 @@ Gauges::Gauges(LGFX_W5& lcd) : lcd(lcd), centre(&lcd) {
 bool Gauges::begin() {
     centre.setPsram(false);  // internal RAM: keeps drawing off the PSRAM bus
     centre.setColorDepth(16);
-    return centre.createSprite(CENTRE_W, CENTRE_H) != nullptr;
+    rpmText.setPsram(false);
+    rpmText.setColorDepth(16);
+    return centre.createSprite(CENTRE_W, CENTRE_H) != nullptr &&
+           rpmText.createSprite(RPM_TEXT_W, RPM_TEXT_H) != nullptr;
 }
 
 // Colours [from, to) of an arc either lit or unlit
@@ -163,10 +171,28 @@ void Gauges::drawRpm(const RpmView& v) {
     // The centre only changes when what it shows does; RPM is rounded to
     // 10 so idle wobble doesn't repaint it constantly
     int shownRpm = v.rpm / 10 * 10;
-    if (shownRpm == lastRpm.rpm && v.gear == lastRpm.gear && v.live == lastRpm.live &&
-        v.shift == lastRpm.shift) return;
+    bool sameLook = v.gear == lastRpm.gear && v.live == lastRpm.live && v.shift == lastRpm.shift;
+    if (shownRpm == lastRpm.rpm && sameLook) return;
     lastRpm = v;
     lastRpm.rpm = shownRpm;
+
+    char buf[16];
+    if (v.live) snprintf(buf, sizeof(buf), "%d,%03d", shownRpm / 1000, shownRpm % 1000);
+    else snprintf(buf, sizeof(buf), "--");
+    uint16_t rpmColor = !v.live ? COL_LABEL : v.shift == SHIFT_NOW ? COL_RED
+                      : v.shift == SHIFT_SOON ? COL_GREEN : COL_TEXT;
+
+    // Most frames only the number moves: send just its box (a small push
+    // keeps the panel's frame buffer reads from being starved)
+    if (sameLook) {
+        rpmText.fillScreen(COL_BG);
+        useFont(rpmText, FONT_L);
+        rpmText.setTextDatum(textdatum_t::middle_center);
+        rpmText.setTextColor(rpmColor);
+        rpmText.drawString(buf, RPM_TEXT_W / 2, RPM_TEXT_H / 2);
+        rpmText.pushSprite(&lcd, rpmArc.ox + C - RPM_TEXT_W / 2, rpmArc.oy + C + RPM_TEXT_Y - RPM_TEXT_H / 2);
+        return;
+    }
 
     LGFX_Sprite& s = centre;
     const int cx = CENTRE_W / 2, cy = CENTRE_TOP;
@@ -177,13 +203,9 @@ void Gauges::drawRpm(const RpmView& v) {
     s.setTextColor(!haveGear ? COL_LABEL : v.gear == 0 ? COL_NEUTRAL : COL_TEXT);
     s.drawString(haveGear ? gearLabel(v.gear) : "-", cx, cy - 12);
 
-    char buf[16];
-    if (v.live) snprintf(buf, sizeof(buf), "%d,%03d", shownRpm / 1000, shownRpm % 1000);
-    else snprintf(buf, sizeof(buf), "--");
     useFont(s, FONT_L);
-    s.setTextColor(!v.live ? COL_LABEL : v.shift == SHIFT_NOW ? COL_RED
-                                       : v.shift == SHIFT_SOON ? COL_GREEN : COL_TEXT);
-    s.drawString(buf, cx, cy + 58);
+    s.setTextColor(rpmColor);
+    s.drawString(buf, cx, cy + RPM_TEXT_Y);
 
     useFont(s, FONT_S);
     s.setTextColor(COL_LABEL);
